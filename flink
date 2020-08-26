@@ -1,0 +1,36 @@
+@tasks.bind()
+def valuation_job():
+    return say_hello.send("Frans", "King").continue_with(say_goodbye).continue_with(done)
+
+@tasks.bind()
+def say_hello(name, surname):
+    return f'{name} {surname}', 'Goodbye', 'To be passed through', 'And some more'
+
+
+@tasks.bind()
+def say_goodbye(full_name, greeting):
+    return f'{greeting} {full_name}'
+
+
+@tasks.bind()
+def done(ending, a, b):
+    return really_done.send()
+
+
+@tasks.bind()
+def really_done():
+    return f'Really done'
+    
+    
+[2020-08-26 17:49:58 +0100] [83788] [INFO] Using worker: sync
+[2020-08-26 17:49:58 +0100] [83791] [INFO] Booting worker with pid: 83791
+INFO:worker:Worker starting
+df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.valuation_job - (caller: None)
+ed49f52b-d3a8-4acb-8545-c3b6f8ba2b2f - worker.say_hello - (caller: df475b36-ca86-4b2b-8d75-75a5b2113b11)
+df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.say_hello.result - (caller: ed49f52b-d3a8-4acb-8545-c3b6f8ba2b2f)
+c8e9f80e-bf55-46fe-8bb1-278270343f93 - worker.say_goodbye - (caller: df475b36-ca86-4b2b-8d75-75a5b2113b11)
+df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.say_goodbye.result - (caller: c8e9f80e-bf55-46fe-8bb1-278270343f93)
+0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7 - worker.done - (caller: df475b36-ca86-4b2b-8d75-75a5b2113b11)
+81983bdf-20fb-44ba-88ed-4c359e0c33aa - worker.really_done - (caller: 0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7)
+0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7 - worker.really_done.result - (caller: 81983bdf-20fb-44ba-88ed-4c359e0c33aa)
+df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.done.result - (caller: 0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7)
