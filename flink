@@ -1,36 +1,175 @@
-@tasks.bind()
-def valuation_job():
-    return say_hello.send("Frans", "King").continue_with(say_goodbye).continue_with(done)
 
-@tasks.bind()
-def say_hello(name, surname):
-    return f'{name} {surname}', 'Goodbye', 'To be passed through', 'And some more'
+from statefun_tasks import TaskRequest, TaskResult, TaskException
 
-
-@tasks.bind()
-def say_goodbye(full_name, greeting):
-    return f'{greeting} {full_name}'
+from google.protobuf.any_pb2 import Any
+from kafka.errors import NoBrokersAvailable
+from kafka import KafkaProducer, KafkaConsumer, TopicPartition
 
 
-@tasks.bind()
-def done(ending, a, b):
-    return really_done.send()
+from uuid import uuid4
+from threading import Thread
+from typing import List
+import socket
+import hashlib
+import asyncio
+from concurrent.futures import Future
 
 
-@tasks.bind()
-def really_done():
-    return f'Really done'
+class KafkaRequestResponseClient(object):
+    def __init__(self, kafka_broker_url, reply_topic='statefun-test.reply', reply_topic_partitions=32):
+        self._kafka_broker_url = kafka_broker_url
+        self._requests = {}
+
+        self._node_id = self._get_node_id()
+        self._reply_topic = f'{reply_topic}.{self._node_id}'
+        self._group_id = f'{self._reply_topic}.{str(uuid4())}' # unique for instance
+
+        self._producer = KafkaProducer(bootstrap_servers=[kafka_broker_url])
+
+        self._consumer = KafkaConsumer(
+            self._reply_topic,
+            bootstrap_servers=[self._kafka_broker_url],
+            auto_offset_reset='latest',
+            group_id=self._group_id)
+
+        self._consumer_thread = Thread(target=self._consume, args=())
+        self._consumer_thread.daemon = True
+        self._consumer_thread.start()
+
+
+    def _get_node_id(self):
+        return socket.gethostname()
+
+    def get_reply_topic(self):
+        return self._reply_topic
+
+    def send(self, topic, task_request: TaskRequest):
+        if task_request.id is None or task_request.id == "":
+            raise ValueError('Task request is missing an id')
+
+        if task_request.type is None or task_request.type == "":
+            raise ValueError('Task request is missing a type')
+
+        future = Future()
+        self._requests[task_request.id] = future
+
+        task_request.reply_topic = self._reply_topic
+
+        key = task_request.id.encode('utf-8')
+        val = task_request.SerializeToString()
+
+        self._producer.send(topic=topic, key=key, value=val)
+        self._producer.flush()
+
+        return future, task_request.id
+
+    async def send_async(self, topic, task_request: TaskRequest):
+        future, _ = self.send(topic, task_request)
+        return await asyncio.wrap_future(future)
     
+    def _consume(self):
+        while True:
+            try:
+                for message in self._consumer: 
+                    any = Any()
+                    any.ParseFromString(message.value)
+
+                    if any.Is(TaskException.DESCRIPTOR):
+                        self._raise_exception(any)
+                    elif any.Is(TaskResult.DESCRIPTOR):
+                        self._return_result(any)
+                          
+            except Exception as ex:
+                print(f"Warning exception in consumer thread - {ex}")
+
+    def _return_result(self, any: Any):
+        task_result = TaskResult()
+        any.Unpack(task_result)
+
+        correlation_id = task_result.correlation_id
+
+        future = self._requests.get(correlation_id, None) 
+
+        if future is not None:
+            del self._requests[correlation_id]
+
+            try:
+                future.set_result(task_result)
+            except Exception as ex:
+                future.set_exception(ex)
+
+    def _raise_exception(self, any: Any):
+        task_exception = TaskException()
+        any.Unpack(task_exception)
+
+        correlation_id = task_exception.correlation_id
+
+        future = self._requests.get(correlation_id, None) 
+
+        if future is not None:
+            del self._requests[correlation_id]
+
+            try:
+                future.set_exception(TaskError(task_exception))
+            except Exception as ex:
+                future.set_exception(ex)
+
+
+class TaskError(Exception):
+    def __init__(self, ex: TaskException, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.type = ex.exception_type
+        self.message = ex.exception_message
+        self.stacktrace = ex.stacktrace
+
     
-[2020-08-26 17:49:58 +0100] [83788] [INFO] Using worker: sync
-[2020-08-26 17:49:58 +0100] [83791] [INFO] Booting worker with pid: 83791
-INFO:worker:Worker starting
-df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.valuation_job - (caller: None)
-ed49f52b-d3a8-4acb-8545-c3b6f8ba2b2f - worker.say_hello - (caller: df475b36-ca86-4b2b-8d75-75a5b2113b11)
-df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.say_hello.result - (caller: ed49f52b-d3a8-4acb-8545-c3b6f8ba2b2f)
-c8e9f80e-bf55-46fe-8bb1-278270343f93 - worker.say_goodbye - (caller: df475b36-ca86-4b2b-8d75-75a5b2113b11)
-df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.say_goodbye.result - (caller: c8e9f80e-bf55-46fe-8bb1-278270343f93)
-0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7 - worker.done - (caller: df475b36-ca86-4b2b-8d75-75a5b2113b11)
-81983bdf-20fb-44ba-88ed-4c359e0c33aa - worker.really_done - (caller: 0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7)
-0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7 - worker.really_done.result - (caller: 81983bdf-20fb-44ba-88ed-4c359e0c33aa)
-df475b36-ca86-4b2b-8d75-75a5b2113b11 - worker.done.result - (caller: 0cd2b5e3-de66-439d-a4f6-6c34ad0e01f7)
+    def __str__(self):
+        return f'type: {self.type} message: {self.message} stacktrace: {self.stacktrace}'
+
+
+
+
+from statefun_tasks import TaskRequest, TaskResult, TaskException, deserialise_result
+# from google.protobuf.json_format import MessageToDict
+
+from kafka.errors import NoBrokersAvailable
+from kafka import KafkaProducer, KafkaConsumer
+
+from aiohttp import web
+from uuid import uuid4
+import json
+import asyncio
+import pickle
+
+from .kafka_client import KafkaRequestResponseClient
+
+KAFKA_BROKER = ""
+
+kafka_client = KafkaRequestResponseClient(KAFKA_BROKER)
+
+
+async def index(request):
+    try:
+
+        # task_request = TaskRequest(id=str(uuid4()), type='my_examples.api.valuation_job', content_type='application/json', data=None)
+
+        request_data = json.dumps(['Jane', 'Doe']).encode('utf-8')
+        task_request = TaskRequest(id=str(uuid4()), type='my_examples.api.greeting_workflow', content_type='application/json', data=request_data)
+        task_result = await kafka_client.send_async(topic='statefun-test.requests', task_request=task_request)
+
+        response_data = {
+            'task_request': str(task_request),
+            'task_result': str(task_result),
+            'task_data': deserialise_result(task_result)
+        }
+    except Exception as ex:
+        response_data = {'error': str(ex)}
+
+    return web.Response(text=json.dumps(response_data, indent=True), content_type='application/json')
+
+
+async def app():
+    web_app = web.Application()
+    web_app.router.add_get('/', index)
+    return web_app
+
